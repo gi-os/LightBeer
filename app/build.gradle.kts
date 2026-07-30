@@ -64,7 +64,9 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
-    // Video-scrubbed pour: frame-accurate seekTo() and crop-to-fill rendering.
-    implementation("androidx.media3:media3-exoplayer:1.10.1")
-    implementation("androidx.media3:media3-ui:1.10.1")
+    // Video-scrubbed pour: frame-accurate seekTo() and crop-to-fill rendering. Pinned at
+    // 1.4.x on purpose — 1.10.x's AAR metadata demands compileSdk 36, which is past what
+    // AGP 8.7.3 (and this project's compileSdk 35) supports.
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-ui:1.4.1")
 }
