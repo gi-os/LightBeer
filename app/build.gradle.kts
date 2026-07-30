@@ -15,7 +15,7 @@ android {
         targetSdk = 35
         // CI overwrites both from the workflow run number; see .github/workflows/build.yml
         versionCode = 1
-        versionName = "2.1.0"
+        versionName = "2.2.0"
 
         // The LPIII is arm64 only; shipping four ABIs tripled the APK for nothing.
         ndk { abiFilters += "arm64-v8a" }
@@ -64,9 +64,9 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
-    // Video-scrubbed pour: frame-accurate seekTo() and crop-to-fill rendering. Pinned at
-    // 1.4.x on purpose — 1.10.x's AAR metadata demands compileSdk 36, which is past what
-    // AGP 8.7.3 (and this project's compileSdk 35) supports.
+    // Video-scrubbed pour: frame-accurate seekTo(). Pinned at 1.4.x on purpose — 1.10.x's
+    // AAR metadata demands compileSdk 36, which is past what AGP 8.7.3 (and this project's
+    // compileSdk 35) supports. media3-ui is deliberately not a dependency: rendering goes
+    // through a raw TextureView instead of PlayerView (see ui/BeerScreen.kt for why).
     implementation("androidx.media3:media3-exoplayer:1.4.1")
-    implementation("androidx.media3:media3-ui:1.4.1")
 }

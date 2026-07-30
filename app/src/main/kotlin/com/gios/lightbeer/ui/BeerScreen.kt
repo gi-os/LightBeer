@@ -1,6 +1,7 @@
 package com.gios.lightbeer.ui
 
 import android.content.Context
+import android.graphics.Matrix
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -10,6 +11,7 @@ import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.view.TextureView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
@@ -33,17 +35,15 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
-import androidx.media3.ui.AspectRatioFrameLayout
-import androidx.media3.ui.PlayerView
 import com.gios.lightbeer.R
 import com.gios.lightbeer.audio.BeerAudio
 import com.gios.lightbeer.data.BeerPrefs
@@ -66,9 +66,10 @@ private const val SHAKE_REFILL_BELOW = 0.08f
 private const val SEEK_GRANULARITY_MS = 20L // ~half a video frame; avoids redundant seeks
 
 // How far the video is allowed to visually counter-rotate against device tilt, and how much
-// it has to be scaled up first so a rotated, cropped-to-fill frame never shows a corner gap.
+// extra crop margin that rotation needs on top of the aspect-ratio-correct cover scale so a
+// rotated frame never shows a corner gap.
 private const val ROTATION_MAX_DEG = 55f
-private const val VIDEO_OVERSCALE = 1.9f
+private const val ROTATION_OVERSCALE = 1.8f
 
 private const val NORMAL_GLUG_INTERVAL_SEC = 0.55f
 private const val CHUG_GLUG_INTERVAL_SEC = 0.22f
@@ -123,8 +124,12 @@ fun BeerScreen(prefs: BeerPrefs) {
                 state.chugging -> {
                     state.fill = max(0f, state.fill - dt / CHUG_DURATION_SEC)
                     if (state.fill <= 0f) state.chugging = false
-                    glugIntervalSec = CHUG_GLUG_INTERVAL_SEC
-                    glugRate = 1.2f
+                    // Nothing left to swallow — an empty glass tipped back further just
+                    // shouldn't keep gulping.
+                    if (state.fill > 0f) {
+                        glugIntervalSec = CHUG_GLUG_INTERVAL_SEC
+                        glugRate = 1.2f
+                    }
                 }
                 state.refilling -> {
                     state.fill = min(1f, state.fill + dt / REFILL_DURATION_SEC)
@@ -132,6 +137,7 @@ fun BeerScreen(prefs: BeerPrefs) {
                         state.refilling = false
                         state.countedThisGlass = false
                     }
+                    // This is the "filling" sound, not "drinking" — plays even from ~empty.
                     glugIntervalSec = REFILL_GLUG_INTERVAL_SEC
                     // Rises as the glass fills — the same reason a bottle filling under a tap
                     // climbs in pitch as the air column above the liquid shrinks.
@@ -143,8 +149,11 @@ fun BeerScreen(prefs: BeerPrefs) {
                         .coerceIn(0f, 1f)
                     if (pour > 0f) {
                         state.fill = max(0f, state.fill - pour * DRAIN_PER_SEC * dt)
-                        glugIntervalSec = NORMAL_GLUG_INTERVAL_SEC
-                        glugRate = 0.95f
+                        // Same rule as chugging: tilting an already-empty glass is silent.
+                        if (state.fill > 0f) {
+                            glugIntervalSec = NORMAL_GLUG_INTERVAL_SEC
+                            glugRate = 0.95f
+                        }
                     }
                 }
             }
@@ -171,18 +180,9 @@ fun BeerScreen(prefs: BeerPrefs) {
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         BeerVideo(
             fillProvider = { state.fill },
+            tiltProvider = { state.tiltDeg },
             modifier = Modifier
                 .fillMaxSize()
-                .graphicsLayer {
-                    // Overscaled so a rotated, crop-filled frame never shows a corner gap.
-                    scaleX = VIDEO_OVERSCALE
-                    scaleY = VIDEO_OVERSCALE
-                    // Best guess, unverified on a real LPIII: counter-rotating the content
-                    // against the device's own rotation is what makes the horizon line
-                    // inside it read as level with gravity instead of level with the phone.
-                    // Flip the sign here if it turns out to rotate the wrong way.
-                    rotationZ = (-state.tiltDeg).coerceIn(-ROTATION_MAX_DEG, ROTATION_MAX_DEG)
-                }
                 .pointerInput(Unit) {
                     detectTapGestures(
                         onTap = {
@@ -217,9 +217,17 @@ fun BeerScreen(prefs: BeerPrefs) {
  * the classic "tilt to drink" trick, applied to a real video track. `fillProvider` reports
  * 1 (full) to 0 (empty); position 0ms of the video is a full glass, its end is empty, so the
  * mapping is a direct `(1 - fill) * duration`.
+ *
+ * Renders onto a raw [TextureView] rather than media3's `PlayerView`, on purpose:
+ * `PlayerView` defaults to a `SurfaceView`, and a `SurfaceView`'s content is composited by a
+ * separate hardware overlay that does not honour the rotation/scale a parent applies to it —
+ * rotating one this way visibly stretches instead of turning. `TextureView` is a normal View
+ * and rotates correctly, but it doesn't crop-to-fill on its own, so the aspect-correct cover
+ * scale [PlayerView]'s `RESIZE_MODE_ZOOM` used to provide is computed by hand below and
+ * combined with the tilt rotation into one matrix.
  */
 @Composable
-private fun BeerVideo(fillProvider: () -> Float, modifier: Modifier = Modifier) {
+private fun BeerVideo(fillProvider: () -> Float, tiltProvider: () -> Float, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val player = remember {
         ExoPlayer.Builder(context).build().apply {
@@ -231,6 +239,8 @@ private fun BeerVideo(fillProvider: () -> Float, modifier: Modifier = Modifier) 
         }
     }
     var durationMs by remember { mutableLongStateOf(0L) }
+    var videoWidth by remember { mutableIntStateOf(0) }
+    var videoHeight by remember { mutableIntStateOf(0) }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
@@ -238,6 +248,11 @@ private fun BeerVideo(fillProvider: () -> Float, modifier: Modifier = Modifier) 
                 if (playbackState == Player.STATE_READY && durationMs <= 0L) {
                     durationMs = player.duration.coerceAtLeast(1L)
                 }
+            }
+
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                videoWidth = videoSize.width
+                videoHeight = videoSize.height
             }
         }
         player.addListener(listener)
@@ -263,14 +278,50 @@ private fun BeerVideo(fillProvider: () -> Float, modifier: Modifier = Modifier) 
         }
     }
 
+    val tiltState by rememberUpdatedState(tiltProvider)
+    var textureView by remember { mutableStateOf<TextureView?>(null) }
+
+    LaunchedEffect(Unit) {
+        val matrix = Matrix()
+        while (true) {
+            withFrameNanos { }
+            val tv = textureView ?: continue
+            val vw = tv.width.toFloat()
+            val vh = tv.height.toFloat()
+            if (vw <= 0f || vh <= 0f || videoWidth <= 0 || videoHeight <= 0) continue
+
+            val viewAspect = vw / vh
+            val videoAspect = videoWidth.toFloat() / videoHeight.toFloat()
+            var scaleX: Float
+            var scaleY: Float
+            if (viewAspect > videoAspect) {
+                scaleX = 1f
+                scaleY = viewAspect / videoAspect
+            } else {
+                scaleX = videoAspect / viewAspect
+                scaleY = 1f
+            }
+            scaleX *= ROTATION_OVERSCALE
+            scaleY *= ROTATION_OVERSCALE
+
+            // Best guess, unverified on a real LPIII: counter-rotating against the device's
+            // own rotation is what makes the horizon line read as level with gravity instead
+            // of level with the phone. Flip the sign here if it turns out to rotate backwards.
+            val rotationDeg = (-tiltState()).coerceIn(-ROTATION_MAX_DEG, ROTATION_MAX_DEG)
+
+            matrix.reset()
+            matrix.postScale(scaleX, scaleY, vw / 2f, vh / 2f)
+            matrix.postRotate(rotationDeg, vw / 2f, vh / 2f)
+            tv.setTransform(matrix)
+        }
+    }
+
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
-            PlayerView(ctx).apply {
-                this.player = player
-                useController = false
-                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                setShutterBackgroundColor(android.graphics.Color.BLACK)
+            TextureView(ctx).also { tv ->
+                player.setVideoTextureView(tv)
+                textureView = tv
             }
         },
     )
