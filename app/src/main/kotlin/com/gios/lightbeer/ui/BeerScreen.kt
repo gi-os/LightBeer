@@ -63,13 +63,22 @@ private const val REFILL_DURATION_SEC = 1.2f
 private const val SHAKE_DELTA_MS2 = 22f // deviation from 1g that counts as a shake
 private const val SHAKE_COOLDOWN_MS = 700L
 private const val SHAKE_REFILL_BELOW = 0.08f
-private const val SEEK_GRANULARITY_MS = 20L // ~half a video frame; avoids redundant seeks
+// The bundled clip is 96 frames over its duration (~33ms apart); seeking any finer than
+// that can't land on a different frame anyway, so this is the coarsest granularity that
+// costs nothing visually while cutting redundant seekTo() calls.
+private const val SEEK_GRANULARITY_MS = 33L
 
 // How far the video is allowed to visually counter-rotate against device tilt, and how much
 // extra crop margin that rotation needs on top of the aspect-ratio-correct cover scale so a
 // rotated frame never shows a corner gap.
 private const val ROTATION_MAX_DEG = 55f
 private const val ROTATION_OVERSCALE = 1.8f
+// Below this, a new rotation reading isn't worth another setTransform() — TextureView redoes
+// real GPU compositing work on every call, and sensor noise alone jitters by more than this.
+private const val ROTATION_EPSILON_DEG = 0.4f
+// Same idea for the ambient fizz volume: skip the MediaPlayer.setVolume() call unless the
+// fill level actually moved.
+private const val FIZZ_EPSILON = 0.01f
 
 private const val NORMAL_GLUG_INTERVAL_SEC = 0.55f
 private const val CHUG_GLUG_INTERVAL_SEC = 0.22f
@@ -110,6 +119,7 @@ fun BeerScreen(prefs: BeerPrefs) {
     LaunchedEffect(Unit) {
         var lastNanos = withFrameNanos { it }
         var glugTimer = 0f
+        var lastFizzFill = -1f
         while (true) {
             val nowNanos = withFrameNanos { it }
             val dt = ((nowNanos - lastNanos) / 1_000_000_000f).coerceIn(0f, 0.05f)
@@ -167,7 +177,10 @@ fun BeerScreen(prefs: BeerPrefs) {
             } else {
                 glugTimer = 0f
             }
-            audio.setFizzLevel(state.fill)
+            if (abs(state.fill - lastFizzFill) >= FIZZ_EPSILON) {
+                audio.setFizzLevel(state.fill)
+                lastFizzFill = state.fill
+            }
 
             if (state.fill <= 0f && !state.countedThisGlass) {
                 state.countedThisGlass = true
@@ -283,14 +296,28 @@ private fun BeerVideo(fillProvider: () -> Float, tiltProvider: () -> Float, modi
 
     LaunchedEffect(Unit) {
         val matrix = Matrix()
+        var lastRotationDeg = Float.NaN
+        var lastViewW = -1
+        var lastViewH = -1
         while (true) {
             withFrameNanos { }
             val tv = textureView ?: continue
-            val vw = tv.width.toFloat()
-            val vh = tv.height.toFloat()
-            if (vw <= 0f || vh <= 0f || videoWidth <= 0 || videoHeight <= 0) continue
+            val vw = tv.width
+            val vh = tv.height
+            if (vw <= 0 || vh <= 0 || videoWidth <= 0 || videoHeight <= 0) continue
 
-            val viewAspect = vw / vh
+            // Confirmed backwards in testing: rotating the same way the device does (not
+            // against it) is what makes the horizon read as level with gravity here.
+            val rotationDeg = tiltState().coerceIn(-ROTATION_MAX_DEG, ROTATION_MAX_DEG)
+
+            // TextureView redoes real GPU compositing work on every setTransform(), and this
+            // loop runs once a frame — skip it entirely unless something actually moved.
+            val rotationChanged = lastRotationDeg.isNaN() ||
+                abs(rotationDeg - lastRotationDeg) >= ROTATION_EPSILON_DEG
+            val sizeChanged = vw != lastViewW || vh != lastViewH
+            if (!rotationChanged && !sizeChanged) continue
+
+            val viewAspect = vw.toFloat() / vh
             val videoAspect = videoWidth.toFloat() / videoHeight.toFloat()
             var scaleX: Float
             var scaleY: Float
@@ -304,15 +331,14 @@ private fun BeerVideo(fillProvider: () -> Float, tiltProvider: () -> Float, modi
             scaleX *= ROTATION_OVERSCALE
             scaleY *= ROTATION_OVERSCALE
 
-            // Best guess, unverified on a real LPIII: counter-rotating against the device's
-            // own rotation is what makes the horizon line read as level with gravity instead
-            // of level with the phone. Flip the sign here if it turns out to rotate backwards.
-            val rotationDeg = (-tiltState()).coerceIn(-ROTATION_MAX_DEG, ROTATION_MAX_DEG)
-
             matrix.reset()
             matrix.postScale(scaleX, scaleY, vw / 2f, vh / 2f)
             matrix.postRotate(rotationDeg, vw / 2f, vh / 2f)
             tv.setTransform(matrix)
+
+            lastRotationDeg = rotationDeg
+            lastViewW = vw
+            lastViewH = vh
         }
     }
 

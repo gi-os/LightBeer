@@ -54,6 +54,15 @@ The trade-off is that `TextureView` doesn't crop-to-fill on its own the way `Pla
 so the aspect-correct cover scale is computed by hand in `ui/BeerScreen.kt` and combined with
 the tilt rotation into one `Matrix` passed to `setTransform()`.
 
+`TextureView` also redoes real GPU compositing work on every `setTransform()` call, unlike
+`SurfaceView`'s hardware overlay — calling that unconditionally once a frame (~60x/sec) was
+visibly laggy. The rotation/seek loop now skips the call entirely unless the rotation angle
+moved by more than `ROTATION_EPSILON_DEG` or the view was resized, and the ambient fizz
+volume update (a `MediaPlayer.setVolume()` call) is gated the same way on fill level actually
+changing. The video's own `seekTo()` granularity was also loosened from 20ms to 33ms to match
+the bundled clip's actual per-frame spacing (finer than that can't land on a different frame
+anyway, so it was pure wasted work).
+
 ### Sound
 
 Three synthesized effects (`scripts/gen_beer_sounds.py`, numpy DSP, no licensed audio),
@@ -79,11 +88,15 @@ glass stays silent (checked each physics tick, both in the tilt-pour branch and 
 branch in `ui/BeerScreen.kt`) — only the refill "filling" glug is allowed to play from
 near-empty, since that one represents the glass filling up, not someone drinking from it.
 
-**Not yet verified on a real LPIII**: the tilt axis (`atan2(ax, ay)`) is a best guess at
-which physical tilt should pour the glass, and the rotation sign (`-state.tiltDeg` in the
-`graphicsLayer` block) is a separate best guess at which way to counter-rotate so the
-horizon looks level instead of backwards. Both are one-line sign flips in `ui/BeerScreen.kt`
-if either reads wrong on a real device — cosmetics only, nothing else depends on them.
+**Confirmed on a real device**: the rotation direction was backwards in the first cut
+(counter-rotating against the tilt, on the theory that the video needed to cancel the
+phone's own rotation) — turns out rotating *with* it is what reads as level with gravity,
+now fixed in `ui/BeerScreen.kt`.
+
+**Still not verified**: the tilt axis (`atan2(ax, ay)`) driving *pour* is a separate best
+guess — nobody's reported the pour direction being wrong, but it hasn't been explicitly
+confirmed either. One-line sign flip in `TiltAndShake` in `ui/BeerScreen.kt` if it ever
+turns out backwards — cosmetics only, nothing else depends on it.
 
 ### Regenerating the video
 
@@ -149,6 +162,7 @@ sideloaded APK like LightTip and LightPass.
 
 | Version | Change |
 | --- | --- |
+| v2.3.0 | Fixed rotation direction (was backwards) and a real performance regression from the TextureView switch — setTransform()/setVolume() were firing every frame unconditionally |
 | v2.2.0 | Fixed the tilt-rotation stretching instead of rotating (PlayerView/SurfaceView → raw TextureView with a hand-rolled crop+rotate matrix); glug sound no longer plays while tilting or chugging an already-empty glass |
 | v2.1.0 | The glass visually counter-rotates against device tilt so the liquid horizon reads as level with gravity; three synthesized sound effects (fizz bed, glug, clink) |
 | v2.0.0 | Full-screen video-scrubbed pour (media3/ExoPlayer) replaces the hand-drawn Canvas glass; animated refill instead of an instant snap; app renamed off its working title |
