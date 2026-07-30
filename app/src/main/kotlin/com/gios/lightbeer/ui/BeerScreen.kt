@@ -33,6 +33,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -44,6 +45,7 @@ import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.gios.lightbeer.R
+import com.gios.lightbeer.audio.BeerAudio
 import com.gios.lightbeer.data.BeerPrefs
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -62,6 +64,15 @@ private const val SHAKE_DELTA_MS2 = 22f // deviation from 1g that counts as a sh
 private const val SHAKE_COOLDOWN_MS = 700L
 private const val SHAKE_REFILL_BELOW = 0.08f
 private const val SEEK_GRANULARITY_MS = 20L // ~half a video frame; avoids redundant seeks
+
+// How far the video is allowed to visually counter-rotate against device tilt, and how much
+// it has to be scaled up first so a rotated, cropped-to-fill frame never shows a corner gap.
+private const val ROTATION_MAX_DEG = 55f
+private const val VIDEO_OVERSCALE = 1.9f
+
+private const val NORMAL_GLUG_INTERVAL_SEC = 0.55f
+private const val CHUG_GLUG_INTERVAL_SEC = 0.22f
+private const val REFILL_GLUG_INTERVAL_SEC = 0.28f
 
 /** Everything the glass needs, driven one frame at a time; the video does the rendering. */
 private class BeerState {
@@ -82,6 +93,8 @@ fun BeerScreen(prefs: BeerPrefs) {
             it.countedThisGlass = false
         }
     }
+    val audio = remember { BeerAudio(context) }
+    DisposableEffect(Unit) { onDispose { audio.release() } }
 
     TiltAndShake(
         onTilt = { angle -> state.tiltDeg += (angle - state.tiltDeg) * TILT_SMOOTHING },
@@ -95,15 +108,23 @@ fun BeerScreen(prefs: BeerPrefs) {
 
     LaunchedEffect(Unit) {
         var lastNanos = withFrameNanos { it }
+        var glugTimer = 0f
         while (true) {
             val nowNanos = withFrameNanos { it }
             val dt = ((nowNanos - lastNanos) / 1_000_000_000f).coerceIn(0f, 0.05f)
             lastNanos = nowNanos
 
+            // Set only while there's a reason to hear a swallow this tick; left at their
+            // defaults (no interval) resets the timer instead of firing on old debt.
+            var glugIntervalSec = Float.MAX_VALUE
+            var glugRate = 1f
+
             when {
                 state.chugging -> {
                     state.fill = max(0f, state.fill - dt / CHUG_DURATION_SEC)
                     if (state.fill <= 0f) state.chugging = false
+                    glugIntervalSec = CHUG_GLUG_INTERVAL_SEC
+                    glugRate = 1.2f
                 }
                 state.refilling -> {
                     state.fill = min(1f, state.fill + dt / REFILL_DURATION_SEC)
@@ -111,6 +132,10 @@ fun BeerScreen(prefs: BeerPrefs) {
                         state.refilling = false
                         state.countedThisGlass = false
                     }
+                    glugIntervalSec = REFILL_GLUG_INTERVAL_SEC
+                    // Rises as the glass fills — the same reason a bottle filling under a tap
+                    // climbs in pitch as the air column above the liquid shrinks.
+                    glugRate = 0.75f + 0.65f * state.fill
                 }
                 else -> {
                     val tiltMag = abs(state.tiltDeg)
@@ -118,9 +143,22 @@ fun BeerScreen(prefs: BeerPrefs) {
                         .coerceIn(0f, 1f)
                     if (pour > 0f) {
                         state.fill = max(0f, state.fill - pour * DRAIN_PER_SEC * dt)
+                        glugIntervalSec = NORMAL_GLUG_INTERVAL_SEC
+                        glugRate = 0.95f
                     }
                 }
             }
+
+            if (glugIntervalSec < Float.MAX_VALUE) {
+                glugTimer += dt
+                if (glugTimer >= glugIntervalSec) {
+                    glugTimer = 0f
+                    audio.playGlug(glugRate)
+                }
+            } else {
+                glugTimer = 0f
+            }
+            audio.setFizzLevel(state.fill)
 
             if (state.fill <= 0f && !state.countedThisGlass) {
                 state.countedThisGlass = true
@@ -135,9 +173,22 @@ fun BeerScreen(prefs: BeerPrefs) {
             fillProvider = { state.fill },
             modifier = Modifier
                 .fillMaxSize()
+                .graphicsLayer {
+                    // Overscaled so a rotated, crop-filled frame never shows a corner gap.
+                    scaleX = VIDEO_OVERSCALE
+                    scaleY = VIDEO_OVERSCALE
+                    // Best guess, unverified on a real LPIII: counter-rotating the content
+                    // against the device's own rotation is what makes the horizon line
+                    // inside it read as level with gravity instead of level with the phone.
+                    // Flip the sign here if it turns out to rotate the wrong way.
+                    rotationZ = (-state.tiltDeg).coerceIn(-ROTATION_MAX_DEG, ROTATION_MAX_DEG)
+                }
                 .pointerInput(Unit) {
                     detectTapGestures(
-                        onTap = { vibrate(context, 15) },
+                        onTap = {
+                            audio.playClink()
+                            vibrate(context, 15)
+                        },
                         onDoubleTap = {
                             if (!state.chugging && !state.refilling && state.fill > 0f) {
                                 state.chugging = true

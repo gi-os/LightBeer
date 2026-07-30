@@ -18,11 +18,18 @@ of the clip is a full glass, its end is empty, and the app just picks a frame:
 
 - **Tilt to drink.** The accelerometer drives a smoothed tilt angle; past a dead zone the
   glass pours, faster the further past vertical you go.
+- **The glass visually rotates against the tilt**, so the liquid's horizon line stays level
+  with gravity instead of level with the phone — the same thing a real glass does in your
+  hand. This is a `graphicsLayer { rotationZ = ... }` counter-rotation of the whole video
+  layer (overscaled ~1.9x first so a rotated, cropped-to-fill frame never shows a corner
+  gap), not a physically simulated liquid surface — the video has no separate "liquid" and
+  "glass" layers to rotate independently, so the trick only works because the shot never
+  shows a fixed glass rim to reveal it.
 - **Shake to refill**, but only once the glass is nearly empty — it animates back up to
   full over about a second rather than snapping, so a refill actually looks like one.
 - **Double-tap to chug** — drains in about a second regardless of how the phone is held,
   and still counts as a finished beer.
-- **Single tap** is just a haptic clink.
+- **Single tap** is a haptic clink, with a matching clink sound.
 - **Beers today** persists across relaunches (`SharedPreferences`, keyed by epoch day —
   same pattern as LightNotebook's calendar entries) and resets itself at local midnight,
   shown as a small overlay in the corner — the only thing drawn on top of the glass.
@@ -34,9 +41,31 @@ lands on the exact frame instead of the nearest keyframe). The bundled clip
 specifically so a random seek is cheap and precise; a normal long-GOP encode would have to
 decode forward from the last keyframe on every scrub and visibly lag.
 
+### Sound
+
+Three synthesized effects (`scripts/gen_beer_sounds.py`, numpy DSP, no licensed audio),
+played through `audio/BeerAudio.kt`:
+
+- **`fizz_loop.wav`** — carbonation hiss + crackle, built directly in the frequency domain
+  so the loop point is mathematically seamless rather than crossfaded. Loops continuously
+  through a `MediaPlayer` from app launch; its volume tracks fill level, so it fades out as
+  the glass empties instead of needing a separate mute state.
+- **`glug.wav`** — a single descending-pitch swallow, retriggered through a `SoundPool` at
+  an interval and playback `rate` that depend on what's happening: steady while tilt-pouring,
+  faster while chugging, and rising in pitch while refilling (mimicking the way a bottle
+  filling under a tap climbs in pitch as the air column above the liquid shrinks).
+- **`clink.wav`** — a short inharmonic "glass cheers" tap, on single tap.
+
+**Not verified by ear** — nothing in this environment can play audio back, so these were
+built from first-principles DSP (envelopes, decay rates, frequency bands) and checked only
+for sane peak/RMS levels, not by listening. If any of the three sound wrong, they're cheap
+to regenerate and are worth an actual listen on a device before assuming they're right.
+
 **Not yet verified on a real LPIII**: the tilt axis (`atan2(ax, ay)`) is a best guess at
-which physical tilt should pour the glass. If it pours the wrong way, flip the sign in
-`TiltAndShake` in `ui/BeerScreen.kt` — cosmetics only, nothing else depends on it.
+which physical tilt should pour the glass, and the rotation sign (`-state.tiltDeg` in the
+`graphicsLayer` block) is a separate best guess at which way to counter-rotate so the
+horizon looks level instead of backwards. Both are one-line sign flips in `ui/BeerScreen.kt`
+if either reads wrong on a real device — cosmetics only, nothing else depends on them.
 
 ### Regenerating the video
 
@@ -52,6 +81,13 @@ ffmpeg -y -framerate 30 -i /tmp/beer_frames/frame_%04d.png \
   -pix_fmt yuv420p -g 1 -keyint_min 1 -sc_threshold 0 \
   -c:v libx264 -profile:v high -crf 21 -preset medium -movflags +faststart \
   app/src/main/res/raw/beer_pour.mp4
+```
+
+Regenerate the three sound effects the same way (needs only numpy — no ffmpeg, WAV is
+written directly):
+
+```
+python3 scripts/gen_beer_sounds.py app/src/main/res/raw
 ```
 
 The frame-to-fill mapping in the generator is linear on purpose
@@ -95,6 +131,7 @@ sideloaded APK like LightTip and LightPass.
 
 | Version | Change |
 | --- | --- |
+| v2.1.0 | The glass visually counter-rotates against device tilt so the liquid horizon reads as level with gravity; three synthesized sound effects (fizz bed, glug, clink) |
 | v2.0.0 | Full-screen video-scrubbed pour (media3/ExoPlayer) replaces the hand-drawn Canvas glass; animated refill instead of an instant snap; app renamed off its working title |
 | v1.0.0 | Initial commit — tilt-to-drink joke app for the Light Phone III, in full colour |
 
