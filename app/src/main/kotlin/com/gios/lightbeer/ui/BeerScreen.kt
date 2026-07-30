@@ -1,7 +1,6 @@
 package com.gios.lightbeer.ui
 
 import android.content.Context
-import android.graphics.Matrix
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -11,7 +10,6 @@ import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import android.view.TextureView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
@@ -41,9 +39,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
-import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
 import com.gios.lightbeer.R
 import com.gios.lightbeer.audio.BeerAudio
 import com.gios.lightbeer.data.BeerPrefs
@@ -54,10 +53,10 @@ import kotlin.math.max
 import kotlin.math.min
 
 // Tuning. All angles in degrees, all durations in seconds unless the name says otherwise.
-private const val TILT_DEAD_ZONE_DEG = 16f
-private const val TILT_MAX_DEG = 78f
+private const val TILT_DEAD_ZONE_DEG = 6f // small only to ignore hand jitter, not to gate feel
+private const val TILT_MAX_DEG = 75f
 private const val TILT_SMOOTHING = 0.18f
-private const val DRAIN_PER_SEC = 0.55f // a held max tilt empties a full glass in ~1.8s
+private const val DRAIN_PER_SEC = 0.7f // a held max tilt empties a full glass in a bit over 1s
 private const val CHUG_DURATION_SEC = 1.0f
 private const val REFILL_DURATION_SEC = 1.2f
 private const val SHAKE_DELTA_MS2 = 22f // deviation from 1g that counts as a shake
@@ -68,21 +67,12 @@ private const val SHAKE_REFILL_BELOW = 0.08f
 // costs nothing visually while cutting redundant seekTo() calls.
 private const val SEEK_GRANULARITY_MS = 33L
 
-// How far the video is allowed to visually counter-rotate against device tilt, and how much
-// extra crop margin that rotation needs on top of the aspect-ratio-correct cover scale so a
-// rotated frame never shows a corner gap.
-private const val ROTATION_MAX_DEG = 55f
-private const val ROTATION_OVERSCALE = 1.8f
-// Below this, a new rotation reading isn't worth another setTransform() — TextureView redoes
-// real GPU compositing work on every call, and sensor noise alone jitters by more than this.
-private const val ROTATION_EPSILON_DEG = 0.4f
-// Same idea for the ambient fizz volume: skip the MediaPlayer.setVolume() call unless the
-// fill level actually moved.
-private const val FIZZ_EPSILON = 0.01f
-
 private const val NORMAL_GLUG_INTERVAL_SEC = 0.55f
 private const val CHUG_GLUG_INTERVAL_SEC = 0.22f
 private const val REFILL_GLUG_INTERVAL_SEC = 0.28f
+// Same idea as the seek granularity: skip the MediaPlayer.setVolume() call unless the fill
+// level actually moved enough to matter.
+private const val FIZZ_EPSILON = 0.01f
 
 /** Everything the glass needs, driven one frame at a time; the video does the rendering. */
 private class BeerState {
@@ -155,8 +145,12 @@ fun BeerScreen(prefs: BeerPrefs) {
                 }
                 else -> {
                     val tiltMag = abs(state.tiltDeg)
-                    val pour = ((tiltMag - TILT_DEAD_ZONE_DEG) / (TILT_MAX_DEG - TILT_DEAD_ZONE_DEG))
+                    val linear = ((tiltMag - TILT_DEAD_ZONE_DEG) / (TILT_MAX_DEG - TILT_DEAD_ZONE_DEG))
                         .coerceIn(0f, 1f)
+                    // Squared on purpose, not linear: a light tilt should barely drain the
+                    // glass at all, and only a tilt near vertical should empty it fast. A
+                    // straight-line map made small tilts feel like they poured too readily.
+                    val pour = linear * linear
                     if (pour > 0f) {
                         state.fill = max(0f, state.fill - pour * DRAIN_PER_SEC * dt)
                         // Same rule as chugging: tilting an already-empty glass is silent.
@@ -193,7 +187,6 @@ fun BeerScreen(prefs: BeerPrefs) {
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         BeerVideo(
             fillProvider = { state.fill },
-            tiltProvider = { state.tiltDeg },
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(Unit) {
@@ -231,16 +224,16 @@ fun BeerScreen(prefs: BeerPrefs) {
  * 1 (full) to 0 (empty); position 0ms of the video is a full glass, its end is empty, so the
  * mapping is a direct `(1 - fill) * duration`.
  *
- * Renders onto a raw [TextureView] rather than media3's `PlayerView`, on purpose:
- * `PlayerView` defaults to a `SurfaceView`, and a `SurfaceView`'s content is composited by a
- * separate hardware overlay that does not honour the rotation/scale a parent applies to it —
- * rotating one this way visibly stretches instead of turning. `TextureView` is a normal View
- * and rotates correctly, but it doesn't crop-to-fill on its own, so the aspect-correct cover
- * scale [PlayerView]'s `RESIZE_MODE_ZOOM` used to provide is computed by hand below and
- * combined with the tilt rotation into one matrix.
+ * Plain `PlayerView` with the default `SurfaceView` output — no rotation. An earlier version
+ * tried to counter-rotate the frame against device tilt so the liquid line stayed level with
+ * gravity; getting that to rotate instead of stretch meant switching to a `TextureView`
+ * (`SurfaceView` ignores parent transforms), and `TextureView` redoing real GPU compositing
+ * work on every transform update was a genuine, unrecoverable-by-throttling performance cost
+ * on this hardware. `SurfaceView`'s hardware-overlay compositing is essentially free by
+ * comparison, so the fill only ever changes by seeking; the frame itself no longer rotates.
  */
 @Composable
-private fun BeerVideo(fillProvider: () -> Float, tiltProvider: () -> Float, modifier: Modifier = Modifier) {
+private fun BeerVideo(fillProvider: () -> Float, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val player = remember {
         ExoPlayer.Builder(context).build().apply {
@@ -252,8 +245,6 @@ private fun BeerVideo(fillProvider: () -> Float, tiltProvider: () -> Float, modi
         }
     }
     var durationMs by remember { mutableLongStateOf(0L) }
-    var videoWidth by remember { mutableIntStateOf(0) }
-    var videoHeight by remember { mutableIntStateOf(0) }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
@@ -261,11 +252,6 @@ private fun BeerVideo(fillProvider: () -> Float, tiltProvider: () -> Float, modi
                 if (playbackState == Player.STATE_READY && durationMs <= 0L) {
                     durationMs = player.duration.coerceAtLeast(1L)
                 }
-            }
-
-            override fun onVideoSizeChanged(videoSize: VideoSize) {
-                videoWidth = videoSize.width
-                videoHeight = videoSize.height
             }
         }
         player.addListener(listener)
@@ -291,63 +277,14 @@ private fun BeerVideo(fillProvider: () -> Float, tiltProvider: () -> Float, modi
         }
     }
 
-    val tiltState by rememberUpdatedState(tiltProvider)
-    var textureView by remember { mutableStateOf<TextureView?>(null) }
-
-    LaunchedEffect(Unit) {
-        val matrix = Matrix()
-        var lastRotationDeg = Float.NaN
-        var lastViewW = -1
-        var lastViewH = -1
-        while (true) {
-            withFrameNanos { }
-            val tv = textureView ?: continue
-            val vw = tv.width
-            val vh = tv.height
-            if (vw <= 0 || vh <= 0 || videoWidth <= 0 || videoHeight <= 0) continue
-
-            // Confirmed backwards in testing: rotating the same way the device does (not
-            // against it) is what makes the horizon read as level with gravity here.
-            val rotationDeg = tiltState().coerceIn(-ROTATION_MAX_DEG, ROTATION_MAX_DEG)
-
-            // TextureView redoes real GPU compositing work on every setTransform(), and this
-            // loop runs once a frame — skip it entirely unless something actually moved.
-            val rotationChanged = lastRotationDeg.isNaN() ||
-                abs(rotationDeg - lastRotationDeg) >= ROTATION_EPSILON_DEG
-            val sizeChanged = vw != lastViewW || vh != lastViewH
-            if (!rotationChanged && !sizeChanged) continue
-
-            val viewAspect = vw.toFloat() / vh
-            val videoAspect = videoWidth.toFloat() / videoHeight.toFloat()
-            var scaleX: Float
-            var scaleY: Float
-            if (viewAspect > videoAspect) {
-                scaleX = 1f
-                scaleY = viewAspect / videoAspect
-            } else {
-                scaleX = videoAspect / viewAspect
-                scaleY = 1f
-            }
-            scaleX *= ROTATION_OVERSCALE
-            scaleY *= ROTATION_OVERSCALE
-
-            matrix.reset()
-            matrix.postScale(scaleX, scaleY, vw / 2f, vh / 2f)
-            matrix.postRotate(rotationDeg, vw / 2f, vh / 2f)
-            tv.setTransform(matrix)
-
-            lastRotationDeg = rotationDeg
-            lastViewW = vw
-            lastViewH = vh
-        }
-    }
-
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
-            TextureView(ctx).also { tv ->
-                player.setVideoTextureView(tv)
-                textureView = tv
+            PlayerView(ctx).apply {
+                this.player = player
+                useController = false
+                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                setShutterBackgroundColor(android.graphics.Color.BLACK)
             }
         },
     )
