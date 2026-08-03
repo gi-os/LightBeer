@@ -3,6 +3,10 @@ name: Build & Release APK
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.github/workflows/check.yml'
+      - 'signing-fingerprint.txt'
   workflow_dispatch:
 
 permissions:
