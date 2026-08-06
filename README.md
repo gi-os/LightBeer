@@ -27,7 +27,7 @@ of the clip is a full glass, its end is empty, and the app just picks a frame:
   and still counts as a finished beer.
 - **Single tap** is a haptic clink, with a matching clink sound.
 - **Beers today** persists across relaunches (`SharedPreferences`, keyed by epoch day —
-  same pattern as LightNotebook's calendar entries) and resets itself at local midnight,
+  same pattern as BrightNotebook's calendar entries) and resets itself at local midnight,
   shown as a small overlay in the corner — the only thing drawn on top of the glass.
 
 Rendering the pour is `androidx.media3` (`ExoPlayer` + `PlayerView`, `RESIZE_MODE_ZOOM` so
@@ -148,7 +148,7 @@ python3 scripts/generate_icon.py   # needs Pillow; rewrites app/src/main/res/{dr
 The [Light SDK](https://github.com/lightphone/light-sdk) sandbox is built around the
 greyscale design system and its own constrained UI toolkit — this app needs full RGB video
 playback and raw accelerometer access outside any of that, so it ships as a plain
-sideloaded APK like LightTip and LightPass.
+sideloaded APK like BrightTip and BrightPasses.
 
 ## Version history
 
