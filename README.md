@@ -1,5 +1,7 @@
 # LightBeer
 
+[**⬇ Download the latest APK**](https://github.com/gi-os/LightBeer/releases/latest) · free, open source.
+
 A tilt-to-drink virtual pint for the **Light Phone III** — the one full-colour tool in an
 otherwise greyscale collection. Package `com.gios.lightbeer`, launcher label **Beer**.
 
